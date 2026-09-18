@@ -1,10 +1,14 @@
 # ADR-0007 — Polling-only inbox in v1, and the deletion-notification risk
 
-- **Status:** Accepted (planning default — user decision still **open**, see `PLAN.md` open question 4)
+- **Status:** **Superseded by [ADR-0017](0017-webhooks-primary-inbox-with-polling-backfill.md) (2026-09-18)** — the user
+  answered `PROMPT.md` Q5 with "webhooks", so the accepted risk below ("cannot honour deletion notifications in real
+  time") is **resolved rather than accepted**; polling survives as backfill, and the `inbox_events` queue shape is
+  carried over unchanged.
 - **Date:** 2026-09-18
 - **Deciders:** planner (proposed), user (to confirm, including the accepted risk)
 - **Evidence:** `.claude/skills/inbox-management/SKILL.md`; `docs/meta-endpoints.md` items 4a–4e
-- **Related:** ADR-0006
+- **Related:** ADR-0006, ADR-0017, ADR-0018
+- **Note:** kept unedited below. Its queue-shape commitments were the reason the switch to webhooks changed no reader.
 
 ## Context
 

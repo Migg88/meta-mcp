@@ -1,7 +1,40 @@
 # PLAN — `meta-content-mcp`
 
 Living plan. Source of truth for slice order; `STATUS.md` holds loop state.
-Written 2026-09-18 by `planner` (opus). Nothing here is implemented yet.
+Written 2026-09-18 by `planner` (opus). Revised 2026-09-18 for the transport + inbox scope change. Nothing here is
+implemented yet.
+
+## Scope change — 2026-09-18
+
+The user answered `PROMPT.md` section 8: **Q3 transport → Streamable HTTP**, **Q5 inbox → webhooks**. The deferred
+additive slices A1 and A2 are therefore **in v1**. Three follow-up decisions were confirmed by the user on 2026-09-18 and
+are **settled, not assumptions**:
+
+- **DECISION 1 — both transports ship.** Section 8.3 asked "stdio only, or *also* Streamable HTTP". Confirmed: stdio
+  remains the default for local Claude Code use and Streamable HTTP + OAuth is added **alongside** it. One
+  `createServer(deps)` object, two entry points (`src/server/stdio.ts`, `src/server/http.ts`). If the user later says
+  HTTP-only, deleting `src/server/stdio.ts` and its smoke test must be the entire change — no tool, service, storage or
+  `src/meta/` code may depend on which entry point is running, and `test/unit/server/transport-isolation.test.ts` (S05a)
+  enforces that mechanically. See ADR-0016.
+- **DECISION 2 — webhooks primary, polling retained as backfill.** Confirmed. Webhooks give near-real-time delivery and
+  let the server honour Meta deletion notifications properly; polling stays for initial sync, gap recovery after receiver
+  downtime, and periodic reconciliation. Both producers write the same `inbox_events` rows, so every reader written in
+  S21–S26 is unchanged by this decision. See ADR-0017.
+- **DECISION 3 — the receiver is exposed via Cloudflare Tunnel.** Confirmed. The receiver binds to **loopback only** and
+  `cloudflared` fronts it, so there is no open inbound port, no certificate to manage and no origin server on the public
+  internet. This is coherent with Cloudflare R2 already being the media host (ADR-0009) — one provider, one account. A
+  VPS + reverse proxy remains a documented secondary path but **no slice is built around it**. `cloudflared` is an
+  **operational prerequisite, not an npm dependency**: it belongs in the README quick start and in `.env.example` (the
+  public callback URL), never in `package.json`. See ADR-0018.
+
+Still open and genuinely undecided: which OAuth authorization server backs S05b, and who the non-local HTTP clients are
+(open questions 13 and 14 below). Neither blocks S01–S05.
+
+Consequences already folded into this plan: six new slices (S05a, S05b, S20a, S20b, S20c, plus S31a split out of S31
+because the security documentation no longer fits in one slice), three new ADRs
+(ADR-0016, ADR-0017, ADR-0018) superseding ADR-0006 and ADR-0007, a substantially larger threat-model surface
+(the `security-hardening` skill's "HTTP transport" section is now **in scope**, not "not applicable"), and an updated
+permission map and Definition-of-Done map. Existing slice ids S01–S31 are unchanged so `STATUS.md` stays valid.
 
 ## Ground rules
 
@@ -16,8 +49,12 @@ Written 2026-09-18 by `planner` (opus). Nothing here is implemented yet.
   (opt-in, never CI).
 - Confirmed context: TypeScript `strict`, ESM, Node 22 LTS · SDK v2 (`@modelcontextprotocol/server`/`client` `^2.0.0`,
   `@modelcontextprotocol/core` transitively), spec revision `2026-07-28`, Zod `^4.2.0` · `node:sqlite` ·
-  `META_GRAPH_VERSION` default `v26.0` · stdio only in v1 · polling-only inbox in v1 · router code present,
+  `META_GRAPH_VERSION` default `v26.0` · **stdio (default) + Streamable HTTP with OAuth, both in v1 (ADR-0016)** ·
+  **webhooks primary with polling backfill (ADR-0017)** · router code present,
   `LLM_ROUTER_ENABLED=false` · Cloudflare R2 media · Ad Library behind a flag · MIT.
+- **Two separate identity domains, never mixed.** The OAuth token a client presents to *this* server (S05b) and the Meta
+  access tokens in the vault (S04/S07) are unrelated. No code path may forward an inbound token to Meta, and no Meta token
+  may ever be returned to an MCP client. Every slice that touches either is reviewed by `security-reviewer` (opus).
 - Never hardcode: the Instagram publishing quota (read `content_publishing_limit` live), caption/hashtag/mention limits
   (marked UNVERIFIABLE in `docs/meta-endpoints.md` — re-verify in S12), the BUC rate-limit code list.
 
@@ -40,6 +77,16 @@ Requested only when the owning feature is enabled. Exact scope strings must be r
 | Business Discovery | not available | `instagram_basic` |
 | Hashtag search | not available | `instagram_basic` (+ likely `instagram_manage_insights`) |
 | Ad Library | n/a | identity-verified user token; verify scope in S18 |
+| Webhook subscriptions (comments) | app-dashboard subscription on the IG app + `instagram_business_manage_comments` | `pages_manage_metadata` (+ `instagram_manage_comments`) |
+| Webhook subscriptions (messages) | app-dashboard subscription + `instagram_business_manage_messages` | `pages_manage_metadata`, `pages_messaging` |
+
+The two webhook rows are **reconstructed, not verified** — `docs/meta-endpoints.md` currently contains no webhook section
+at all. `meta-docs-researcher` (sonnet) must verify the subscription endpoints (`POST /{page-id}/subscribed_apps`,
+`POST /{app-id}/subscriptions`), the exact `subscribed_fields` names, the payload envelope shape and the signature header
+name for `META_GRAPH_VERSION`, and log them in `docs/meta-endpoints.md`, **before** S20a is written.
+
+Note that the **MCP OAuth scopes** introduced in S05b are a separate, server-local concept (e.g. `meta:read`,
+`meta:write`) and never appear in this table: they gate access to *this* server's tools, not to Meta.
 
 ---
 
@@ -52,6 +99,8 @@ Requested only when the owning feature is enabled. Exact scope strings must be r
 | S03 | SQLite storage core + migrations | foundation | S02 |
 | S04 | Encrypted vault (AES-256-GCM) | security | S03 |
 | S05 | MCP server bootstrap + `meta_list_accounts` | server | S02, S03 |
+| **S05a** | **Streamable HTTP entry point: binding, `Origin`, session hygiene** | **server** | **S05** |
+| **S05b** | **MCP authorization: audience-checked OAuth, no token passthrough** | **security** | **S05a** |
 | S06 | Meta HTTP client + error/rate-limit mapping + DRY_RUN | meta | S02, S04 |
 | S07 | Dual-login token flows + `meta_account_health` | meta | S04, S05, S06 |
 | S08 | Workflow graph engine + SQLite checkpoints | workflows | S03 |
@@ -67,7 +116,10 @@ Requested only when the owning feature is enabled. Exact scope strings must be r
 | S18 | `meta_competitor_lookup` (Business Discovery) | research | S17 |
 | S19 | `meta_hashtag_research` + rolling-window quota | research | S17 |
 | S20 | `meta_ad_library_search` behind `ADS_LIBRARY_ENABLED` | research | S17 |
-| S21 | `meta_comments_list` + comment store | inbox | S06, S05 |
+| **S20a** | **Webhook receiver process: handshake, signature, fast ack** | **inbox** | **S02, S03** |
+| **S20b** | **Event normalization → `inbox_events`, dedupe, replay defence** | **inbox** | **S20a, S04** |
+| **S20c** | **Subscription management CLI + `meta_webhook_status` + backfill trigger** | **inbox** | **S06, S20b** |
+| S21 | `meta_comments_list` + comment store | inbox | S06, S05, S20b |
 | S22 | Triage graph (rules only) + `meta_comments_triage` | inbox | S08, S21 |
 | S23 | `meta_comment_action_prepare` + confirm actions | inbox | S09, S22 |
 | S24 | Conversations: list/get, encrypted bodies, windows | inbox | S04, S21 |
@@ -77,10 +129,21 @@ Requested only when the owning feature is enabled. Exact scope strings must be r
 | S28 | `meta_reply_draft` + router-backed triage + `meta://knowledge` | llm | S22, S25, S27 |
 | S29 | Cost measurement + `docs/cost.md` | evidence | S28 |
 | S30 | Prompts: weekly plan, competitor report, inbox review | server | S16, S22, S18 |
-| S31 | Docs, security evidence, release readiness | docs | all |
+| S31 | Docs, architecture, `.env.example`, release readiness | docs | all |
+| **S31a** | **`SECURITY.md`, threat model, consolidated security evidence** | **docs** | **S31** |
 
-Deferred additive slices (explicitly **not** v1, must touch no tool/service/meta code): **A1** Streamable HTTP + OAuth
-entry point; **A2** webhook receiver process writing into the same queue tables.
+**37 slices.** The previously deferred slices A1 (Streamable HTTP + OAuth) and A2 (webhook receiver) are now in v1, split
+for size into S05a/S05b and S20a/S20b/S20c respectively. Existing ids S01–S31 keep their numbers so `STATUS.md` and the
+Definition-of-Done map stay valid; only S07, S21 and S26 change wording ("polling only / future receiver / no HTTP
+transport" becomes "webhook-primary, polling backfill" and "two unrelated OAuth systems"), and S31 sheds its `SECURITY.md`
+criteria to the new S31a because the HTTP + webhook threat model no longer fits inside 300 lines.
+
+Ordering rationale: S05a/S05b sit directly after the server bootstrap because they only need `createServer`, and nothing
+from S06 onward depends on them — **publishing work is never blocked by transport work** and the two tracks can run in
+parallel. S20a–S20c land immediately before S21 because S21–S26 consume the `inbox_events` queue the receiver fills;
+building the producer first means the inbox slices are written against a real queue rather than a hypothetical one.
+
+No deferred slices remain.
 
 ---
 
@@ -156,11 +219,14 @@ exact minimum plus Node 24 LTS (see ADR-0003): `node:sqlite` needs no flag and n
 **Depends on:** S02
 **Meta permissions:** none
 **Agents:** implementer (sonnet) → verifier (haiku) → REVIEW security-reviewer (opus) (storage row) → docs-writer (haiku)
-**Size:** ~290 lines
+**Size:** ~290 lines — at the limit. If the `inbox_events` uniqueness constraint and its test push this over ~300, move
+them into a migration owned by S20b rather than trimming tests.
 
 Schema created here (empty tables are cheap; later slices only add columns/indexes): `accounts`, `tokens`, `drafts`,
 `tags`, `draft_tags`, `confirmations`, `workflow_runs`, `posts`, `comments`, `conversations`, `messages`,
-`inbox_events` (the queue a future webhook receiver writes into — see ADR-0007), `cursors`, `hashtag_queries`,
+`inbox_events` (the queue both the webhook receiver (S20b) and the poller (S21) write into — see ADR-0017; add the
+`(source_object, external_id, kind)` uniqueness constraint here so exactly-once is a schema property, not a code
+convention), `cursors`, `hashtag_queries`,
 `llm_usage`, `knowledge`, `schema_migrations`.
 
 **Acceptance criteria**
@@ -171,6 +237,8 @@ Schema created here (empty tables are cheap; later slices only add columns/index
 - Given any repository call, When it builds SQL, Then only parameterized statements are used (no string interpolation of values).
 - Given `inbox_events`, When rows are inserted by any producer, Then readers select by `(account_id, status, created_at)`
   and never care which process wrote them.
+- Given the same `(source_object, external_id, kind)` is inserted twice by any combination of producers, When the second
+  insert runs, Then the uniqueness constraint makes it a no-op rather than a duplicate row.
 
 **Tests**
 - unit `test/unit/storage/migrations.test.ts` — fresh DB reaches latest version; re-run is idempotent; failing migration
@@ -179,6 +247,8 @@ Schema created here (empty tables are cheap; later slices only add columns/index
   explicit skip reason).
 - unit `test/unit/storage/repository.test.ts` — insert/select/update round-trip; a value containing `'; DROP TABLE` is
   stored and read back verbatim.
+- unit `test/unit/storage/inbox-events-uniqueness.test.ts` — duplicate `(source_object, external_id, kind)` from two
+  different `source` values inserts once.
 
 ---
 
@@ -215,8 +285,13 @@ Schema created here (empty tables are cheap; later slices only add columns/index
 
 Establishes the wiring every later tool reuses: `src/server/` (thin), `src/tools/<name>.ts` exporting
 `{ name, description, inputSchema, outputSchema, annotations, handler }`, a registry, and the tool-error mapping.
-Transport is stdio via `serveStdio` (ADR-0006). Re-verify the exact import path against the installed package's
-TypeScript types before writing code (`docs/research/mcp-sdk-verification.md`, item 2d).
+
+**`createServer(deps)` is transport-agnostic and stays that way (ADR-0016).** This slice ships the **stdio** entry point
+only (`src/server/stdio.ts` via `serveStdio`); S05a adds `src/server/http.ts` against the same factory. No tool, service,
+workflow, storage or `src/meta/` module may import anything transport-specific, read an HTTP header, or branch on which
+entry point is running — S05a's tests assert this, and it is what keeps "HTTP-only later" a one-file deletion.
+Re-verify the exact `serveStdio` import path against the installed package's TypeScript types before writing code
+(`docs/research/mcp-sdk-verification.md`, item 2d).
 
 **Acceptance criteria**
 - Given the built server, When a client calls `tools/list`, Then `meta_list_accounts` appears with a description, a strict
@@ -237,6 +312,124 @@ TypeScript types before writing code (`docs/research/mcp-sdk-verification.md`, i
 - smoke `test/smoke/stdio.smoke.test.ts` — spawn `dist/`, `tools/list`, call `meta_list_accounts` with `DRY_RUN=true`;
   assert stdout parses as pure JSON-RPC.
 - unit `test/unit/services/accounts.test.ts` — summary vs full projection.
+
+---
+
+## S05a — Streamable HTTP entry point: binding, `Origin`, session hygiene
+
+**Depends on:** S05
+**Meta permissions:** none (no Meta call happens here)
+**Agents:** meta-docs-researcher (sonnet) first → implementer (sonnet) → verifier (haiku) →
+REVIEW **security-reviewer (opus, mandatory)** (HTTP transport rows) → docs-writer (haiku)
+**Size:** ~280 lines
+**Blocks nothing.** S06 and everything downstream may proceed in parallel.
+
+**Research first.** `docs/research/mcp-sdk-verification.md` covers stdio (item 2d) but says **nothing** about the v2
+Streamable HTTP server API. Before code: confirm against the installed package's `.d.ts` the exact helper name and shape
+(`serveHttp` / `createHttpHandler` / a Node request handler factory), how session ids and resumability are expressed under
+spec `2026-07-28`, and whether the SDK already ships `Origin`/`Host` checks or leaves them to us. Add a row to the
+verification log. **Do not assume the v1 `StreamableHTTPServerTransport` API.**
+
+This slice is transport plumbing and network hardening only. Authorization is S05b: until S05b lands, the HTTP entry
+point refuses to start unless `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` **and** the bind address is loopback, and it logs a
+prominent warning on every start.
+
+**Acceptance criteria**
+- Given `src/server/http.ts` and `src/server/stdio.ts`, When both are built, Then they construct the **same**
+  `createServer(deps)` object and neither contains tool, service or Meta logic.
+- Given default config, When the HTTP server starts, Then it binds to `127.0.0.1` on `MCP_HTTP_PORT`; binding to any other
+  interface requires `MCP_HTTP_BIND` to be set explicitly **and** logs that the server is now network-reachable.
+- Given a request whose `Origin` header is absent or not in `MCP_HTTP_ALLOWED_ORIGINS`, When it arrives, Then it is
+  rejected with `403` before the body is parsed and before any handler runs (DNS-rebinding defence).
+- Given a request whose `Host` header does not match the configured host, When it arrives, Then it is rejected `403`.
+- Given a `POST` without `Accept: application/json, text/event-stream` or with a non-JSON content type, When it arrives,
+  Then it is rejected with `406`/`415` and no handler runs.
+- Given a body larger than `MCP_HTTP_MAX_BODY_BYTES`, When it arrives, Then it is rejected `413` without buffering the
+  remainder.
+- Given a session id is issued, When it is generated, Then it comes from `crypto.randomUUID`, is not derived from any
+  client input, and is compared with `timingSafeEqual`; an unknown or expired session id is rejected `404` and never
+  auto-created.
+- Given the process receives `SIGINT`/`SIGTERM`, When shutting down, Then in-flight requests drain, the listener closes,
+  graph runs checkpoint, and the DB closes — the same lifecycle contract as stdio.
+- Given anything is logged, When the HTTP entry point is running, Then logs still go to stderr as JSON and no request body,
+  `Authorization` header or session id is logged in full.
+- Given the stdio entry point, When S05a lands, Then its smoke test still passes unchanged — HTTP is purely additive.
+
+**Tests**
+- contract `test/contract/http-transport.test.ts` — the SDK client completes `initialize`, `tools/list` and a
+  `meta_list_accounts` call over the HTTP handler in-process; the **same** contract assertions from S05 pass on both
+  transports (shared test helper, run twice).
+- unit `test/unit/server/http-origin.test.ts` — missing `Origin`; disallowed `Origin`; allowed `Origin`; mismatched `Host`;
+  each asserted to reject **before** the handler is invoked (spy on the handler).
+- unit `test/unit/server/http-binding.test.ts` — default bind is `127.0.0.1`; non-loopback bind requires the explicit
+  variable; the warning is emitted.
+- unit `test/unit/server/http-limits.test.ts` — oversize body `413`; wrong content type `415`; missing `Accept` `406`.
+- unit `test/unit/server/http-session.test.ts` — session id is random and unguessable; unknown id rejected; expired id
+  rejected; comparison is constant-time.
+- unit `test/unit/server/transport-isolation.test.ts` — static scan: no file under `src/tools/`, `src/services/`,
+  `src/workflows/`, `src/storage/` or `src/meta/` imports `node:http`, the HTTP entry point, or reads a header. This is
+  the test that keeps "delete stdio later" (or "delete HTTP later") trivial.
+- smoke `test/smoke/http.smoke.test.ts` — spawn the built server with `MCP_TRANSPORT=http`, connect the real SDK client
+  over `127.0.0.1`, call a read-only tool in `DRY_RUN`.
+
+---
+
+## S05b — MCP authorization: audience-checked OAuth, no token passthrough
+
+**Depends on:** S05a
+**Meta permissions:** none — and that is the point (see below)
+**Agents:** meta-docs-researcher (sonnet) first → implementer (sonnet) → verifier (haiku) →
+REVIEW **security-reviewer (opus, mandatory)** → docs-writer (haiku)
+**Size:** ~290 lines
+**Blocks nothing** except shipping HTTP to a non-loopback address.
+
+**Research first.** Confirm against spec revision `2026-07-28` and the installed SDK: the authorization flow this server
+must implement as an OAuth **resource server** (protected-resource metadata document, `WWW-Authenticate` challenge with
+the resource metadata URL, resource indicators / audience binding), and what the SDK provides versus what we write.
+Log it in `docs/research/mcp-sdk-verification.md`. **Open question 15** — whether we act as our own authorization server or
+delegate to an external IdP — must be answered before this slice starts.
+
+**The non-negotiable rule of this slice:** the inbound token authenticates a *client to this server*. It is never
+forwarded to Meta, never stored in the Meta vault, and never logged. Conversely no Meta token is ever returned to a
+client. Meta's own OAuth code exchange stays the out-of-band CLI of S07 even though a listener now exists.
+
+**Acceptance criteria**
+- Given a request to the HTTP transport with no `Authorization` header, When it arrives, Then it is rejected `401` with a
+  `WWW-Authenticate` header pointing at the protected-resource metadata URL, and no tool runs.
+- Given the protected-resource metadata endpoint, When fetched, Then it is served unauthenticated and lists this server's
+  canonical resource identifier and its authorization server(s).
+- Given a token whose `aud` (or resource indicator) is not this server's canonical URI, When presented, Then it is
+  rejected `401` — **even if the signature and expiry are valid**. A token minted for another service is not accepted here.
+- Given a token that is expired, has a bad signature, an unknown issuer, or a `scope` lacking what the called tool
+  requires, When presented, Then it is rejected `401`/`403` with a generic message and a correlation id, and the reason
+  appears only in the redacted log.
+- Given a valid token, When a tool runs, Then the authenticated subject is available to the tool layer **only** as an
+  opaque `principal` value; the raw token never leaves the authorization module.
+- Given any Meta request built anywhere in `src/meta/`, When it is sent, Then its credential comes from the vault and from
+  nowhere else — an inbound token is structurally incapable of reaching it.
+- Given `MCP_HTTP_BIND` is non-loopback, When authorization is not configured, Then the process **refuses to start**.
+- Given the stdio transport, When it runs, Then no authorization is required (the OS process boundary is the trust
+  boundary) and no OAuth config is demanded by config validation.
+- Given a `401`/`403`, When it is returned, Then response timing does not distinguish "unknown token" from "wrong
+  audience" (constant-time compare, no early-exit branching on secret material).
+
+**Tests**
+- unit `test/unit/server/auth-audience.test.ts` — valid token for this resource accepted; **same token with another `aud`
+  rejected**; missing `aud` rejected; multiple-audience token containing ours accepted only if the spec allows it
+  (assert whichever the research step confirms).
+- unit `test/unit/server/auth-token-validation.test.ts` — expired; bad signature; unknown issuer; insufficient scope;
+  malformed header (`Bearer` missing, empty, doubled).
+- unit `test/unit/server/auth-no-passthrough.test.ts` — an inbound token containing a Meta-token-shaped string is
+  presented, a tool runs, the Meta HTTP mock records the **vault** token and never the inbound one; and a static scan
+  asserts no module imports both the authorization context and `src/meta/`'s request builder.
+- unit `test/unit/server/auth-metadata.test.ts` — metadata document served unauthenticated; `WWW-Authenticate` on `401`
+  points at it.
+- unit `test/unit/server/auth-startup-guard.test.ts` — non-loopback bind without auth config exits non-zero; stdio start
+  needs no auth config.
+- unit `test/unit/server/auth-no-leak.test.ts` — no token, no `Authorization` value and no client secret appears in any
+  log line or error body (regex assertion over captured stderr).
+- contract `test/contract/http-authorized.test.ts` — the S05 contract suite passes over HTTP **with** a valid token and
+  fails closed without one.
 
 ---
 
@@ -287,8 +480,10 @@ TypeScript types before writing code (`docs/research/mcp-sdk-verification.md`, i
 **Agents:** implementer (sonnet) → verifier (haiku) → REVIEW **security-reviewer (opus, mandatory)** → docs-writer (haiku)
 **Size:** ~290 lines
 
-Both login paths (ADR-0008). A CLI sub-command performs the OAuth code exchange out of band; the MCP server itself never
-runs a browser flow in v1 (no HTTP transport — ADR-0006).
+Both login paths (ADR-0008). A CLI sub-command performs the Meta authorization-code exchange **out of band**; the MCP
+server itself never runs a browser flow. This stays true even though S05a now adds a listener: **Meta's OAuth and the MCP
+transport's OAuth (S05b) are different systems and must not be conflated.** The MCP listener must not serve a Meta
+redirect URI, and no inbound MCP token may be used as, exchanged for, or stored alongside a Meta token (ADR-0016).
 
 **Acceptance criteria**
 - Given an Instagram Login authorization code, When exchanged, Then a short-lived token is swapped for a long-lived token,
@@ -691,6 +886,157 @@ Re-verify the "30 unique hashtags per account per rolling 7 days" figure (item 5
 
 ---
 
+## S20a — Webhook receiver process: handshake, signature, fast ack
+
+**Depends on:** S02, S03
+**Meta permissions:** none at runtime (the receiver makes no Graph call); subscription scopes are S20c
+**Agents:** meta-docs-researcher (sonnet) first → implementer (sonnet) → verifier (haiku) →
+REVIEW **security-reviewer (opus, mandatory)** → docs-writer (haiku)
+**Size:** ~280 lines
+
+**Research first, blocking.** `docs/meta-endpoints.md` has **no webhook section**. Before any code, `meta-docs-researcher`
+verifies and logs for `META_GRAPH_VERSION`: the verification-handshake parameter names (`hub.mode`, `hub.challenge`,
+`hub.verify_token`), the signature header name and algorithm (`X-Hub-Signature-256`, `sha256=<hex>`, keyed with the **app
+secret**), the payload envelope (`object`, `entry[]`, `changes[]` / `messaging[]`), the documented retry and
+delivery-ordering behaviour, and the ack timeout Meta expects. No field name in this slice may be reconstructed.
+
+**Deployment (ADR-0018).** A standalone process, `src/webhooks/server.ts`, started by its own entry point — **not** the
+MCP server, and not the S05a HTTP transport. It binds **loopback only** and is exposed by **Cloudflare Tunnel**;
+`cloudflared` is an operational prerequisite documented in the README quick start, never an npm dependency. A VPS behind
+a reverse proxy is documented as a secondary option. The receiver shares `src/config`, `src/storage` and the logger with
+the MCP server and imports **nothing** from `src/tools/`, `src/server/` or `src/llm/`.
+
+**Acceptance criteria**
+- Given a `GET` with `hub.mode=subscribe` and a `hub.verify_token` equal to `META_WEBHOOK_VERIFY_TOKEN`, When it arrives,
+  Then the receiver echoes `hub.challenge` verbatim as `text/plain` with `200`; the token comparison uses
+  `crypto.timingSafeEqual` on equal-length buffers.
+- Given a `GET` with a wrong, missing or differently-sized `hub.verify_token`, When it arrives, Then the response is `403`
+  with no body detail and the attempt is logged without the supplied value.
+- Given a `POST`, When it arrives, Then `X-Hub-Signature-256` is recomputed as HMAC-SHA256 over the **exact raw request
+  body bytes** — captured before any JSON parsing and never re-serialized — keyed with the app secret, and compared with
+  `timingSafeEqual`.
+- Given a missing, malformed, wrong-prefix, truncated or tampered signature, When the `POST` is processed, Then it is
+  rejected `401`, **nothing is enqueued**, and the body is never parsed.
+- Given a valid signature, When the body is parsed, Then it is validated against a strict Zod schema; a shape mismatch is
+  logged and acked (Meta must not be made to retry a payload we will never understand) but nothing malformed is enqueued.
+- Given a valid event, When it is handled, Then the receiver **acks within the documented timeout by persisting the raw
+  verified envelope and returning `200`** — no Graph call, no decryption, no LLM call, no triage happens on the request
+  path.
+- Given the database is unavailable, When a `POST` arrives, Then the receiver returns `503` **without** acking, so Meta
+  retries; it never acks work it has not durably stored.
+- Given the process binds, When it starts, Then it binds `127.0.0.1` on `WEBHOOK_PORT`; a non-loopback bind requires an
+  explicit override and logs that the receiver is directly network-reachable and no longer behind the tunnel.
+- Given any webhook payload, When it is logged, Then message bodies, comment text and user ids are masked and the signature
+  header and verify token never appear.
+- Given a payload containing instruction-like text, When it flows anywhere, Then it is stored as **data only**; the
+  receiver has no model, no tool registry and no code path that can act on its content.
+
+**Tests** (all against synthetic requests — see the CI note below)
+- unit `test/unit/webhooks/handshake.test.ts` — correct token echoes the challenge verbatim; wrong token `403`; missing
+  token `403`; a token of a different length `403` without throwing; challenge is echoed unmodified (no JSON wrapping).
+- unit `test/unit/webhooks/signature.test.ts` — valid signature accepted; wrong key; tampered body (single byte);
+  missing header; `sha1=` prefix rejected; empty signature; correct digest with wrong prefix; assert the verifier is given
+  the **raw buffer** (a test body whose re-serialization differs from the original — key order and whitespace — still
+  verifies, proving we never re-serialize).
+- unit `test/unit/webhooks/ack.test.ts` — `200` returned after durable persistence; DB failure yields `503` and no ack;
+  the handler performs zero outbound requests (network mock asserts no calls).
+- unit `test/unit/webhooks/schema.test.ts` — malformed envelope acked but not enqueued; oversize body rejected; unknown
+  `object` type acked and recorded as unhandled.
+- unit `test/unit/webhooks/isolation.test.ts` — static scan: `src/webhooks/` imports nothing from `src/tools/`,
+  `src/server/` or `src/llm/`.
+- live `test/live/webhook-delivery.test.ts` — **`LIVE_TESTS=true` only, never CI.** Real delivery through the tunnel from
+  a real Meta app. See the CI note.
+
+**CI note (record in `STATUS.md` as a known evidence gap).** Webhook delivery cannot be proven end to end from CI: it
+needs a public callback URL, a registered Meta app and Meta actually sending. Everything above is therefore tested against
+**synthetic requests with signatures computed in the test from a test app secret**, which proves the handshake, the
+signature verification, the enqueue and the ack contract. Real delivery is a manual `LIVE_TESTS=true` run recorded in
+`STATUS.md` with a date.
+
+---
+
+## S20b — Event normalization → `inbox_events`, dedupe, replay defence
+
+**Depends on:** S20a, S04
+**Meta permissions:** none
+**Agents:** implementer (sonnet) → verifier (haiku) → REVIEW **security-reviewer (opus, mandatory)** (personal data +
+untrusted content rows) → docs-writer (haiku)
+**Size:** ~270 lines
+
+Turns verified envelopes into the `inbox_events` rows S21–S26 already expect (ADR-0007's queue shape, preserved exactly by
+ADR-0017). This runs **off** the request path, so it may decrypt, encrypt and do real work.
+
+**Acceptance criteria**
+- Given a verified envelope, When it is normalized, Then it produces one `inbox_events` row per change with
+  `(account_id, source: "webhook", external_id, kind, payload, status, created_at)` — the **same shape** the poller writes,
+  and readers still cannot tell which producer wrote it.
+- Given a `kind` of `comment`, `message`, `mention` or `deleted`, When normalized, Then it maps to the same vocabulary the
+  poller uses; an unrecognized change type is stored with `kind: "unhandled"` and never silently dropped.
+- Given Meta redelivers an event (its retry, or a replayed request), When it is normalized, Then a unique constraint on
+  `(source_object, external_id, kind)` makes the second insert a no-op and the event is processed **exactly once**.
+- Given two events for the same object arrive out of order, When they are applied, Then the later `created_at`/sequence
+  wins and an older event never overwrites a newer state.
+- Given an envelope older than `WEBHOOK_MAX_EVENT_AGE`, When normalized, Then it is rejected as a stale replay and counted.
+- Given any personal data in the payload (message bodies, comment text, handles), When the row is stored, Then the body is
+  encrypted with the S04 vault and the raw DB file contains no plaintext.
+- Given a `deleted` event, When it is enqueued, Then the S26 deletion consumer purges the stored item — **in near-real
+  time**, which is precisely the ADR-0007 accepted risk now resolved (ADR-0017).
+- Given normalization throws on one event in a batch, When the batch is processed, Then the remaining events still process
+  and the failed one is retried with backoff up to a bounded attempt count, then parked in a dead-letter status with its
+  correlation id.
+- Given webhook text reaches any consumer, When it is rendered, Then it is sanitized and labelled untrusted exactly as
+  S18's research content is — it is third-party text arriving over the network.
+
+**Tests**
+- unit `test/unit/webhooks/normalize.test.ts` — one case per change type → expected `kind`; unknown type → `unhandled`;
+  field mapping asserted against the fixtures logged in `docs/meta-endpoints.md`.
+- unit `test/unit/webhooks/dedupe.test.ts` — duplicate delivery inserts once; concurrent duplicate deliveries insert once
+  (two parallel writers); out-of-order events resolve to the newest; stale event rejected. Injected clock.
+- unit `test/unit/webhooks/producer-parity.test.ts` — **the key test**: a comment ingested via webhook and the same comment
+  ingested via the S21 poller produce equal `inbox_events` rows apart from `source`; a reader run over both yields one
+  item, not two.
+- unit `test/unit/webhooks/deletion-event.test.ts` — a `deleted` event drives the S26 purge path end to end.
+- unit `test/unit/storage/webhook-payload-encryption.test.ts` — DB byte scan finds no plaintext body.
+- unit `test/unit/webhooks/dead-letter.test.ts` — poison event retried then parked; the batch is not blocked.
+- unit `test/unit/webhooks/untrusted-webhook-text.test.ts` — an injection payload arriving by webhook survives only as
+  labelled data and triggers no tool call.
+
+---
+
+## S20c — Subscription management CLI + `meta_webhook_status` + backfill trigger
+
+**Depends on:** S06, S20b
+**Meta permissions:** `pages_manage_metadata` (+ `instagram_manage_comments` / `instagram_manage_messages`) on the FB
+Login path; app-dashboard subscription on the Instagram Login path — **all to be verified in the S20a research step**
+**Agents:** implementer (sonnet) → verifier (haiku) → REVIEW security-reviewer (opus) → docs-writer (haiku)
+**Size:** ~230 lines
+
+Makes the receiver operable: subscribe accounts, see whether events are actually arriving, and close gaps with polling.
+
+**Acceptance criteria**
+- Given the subscription CLI sub-command, When run for an account, Then it subscribes the app to the verified
+  `subscribed_fields` and records the subscription and its timestamp locally; re-running is idempotent.
+- Given `DRY_RUN=true`, When the CLI runs, Then no subscription write reaches Meta and the intended call is printed.
+- Given `meta_webhook_status`, When called, Then it returns per account: subscribed fields, last event received at, events
+  in the last 24h by kind, dead-lettered count, and `healthy | stale | never_received` — and **no** verify token, app
+  secret or callback secret.
+- Given no event has been received for longer than `WEBHOOK_STALE_AFTER`, When status is computed, Then the account is
+  `stale` and the output names the backfill command — this is how tunnel downtime becomes visible rather than silent.
+- Given the backfill trigger, When run for an account and a time range, Then the S21 poller fills the gap, its rows dedupe
+  against anything the webhook already delivered, and the command reports how many rows were new.
+- Given the callback URL is not registered in the Meta app, When status runs, Then the tool says so plainly and links to the
+  registration step in the README rather than reporting a generic error.
+
+**Tests**
+- integration `test/integration/meta/webhook-subscriptions.test.ts` — subscribe; idempotent re-subscribe; permission error
+  mapping names the missing scope and the login path; `DRY_RUN` writes nothing.
+- unit `test/unit/services/webhook-status.test.ts` — `healthy`/`stale`/`never_received` boundaries with an injected clock;
+  output contains no secret-like string.
+- unit `test/unit/services/webhook-backfill.test.ts` — gap filled; overlapping rows dedupe to one; new-row count correct.
+- contract `test/contract/meta_webhook_status.test.ts` — read-only annotations; output schema; bounded input.
+
+---
+
 ## S21 — `meta_comments_list` + comment store
 
 **Depends on:** S06, S05
@@ -698,12 +1044,16 @@ Re-verify the "30 unique hashtags per account per rolling 7 days" figure (item 5
 **Agents:** implementer (sonnet) → verifier (haiku) → REVIEW **security-reviewer (opus, mandatory)** (personal data row) → docs-writer (haiku)
 **Size:** ~280 lines
 
-Polling only in v1 (ADR-0007), with an incremental `since` cursor per account written into `cursors` and events landing in
-`inbox_events` exactly as a future webhook receiver would write them.
+**Webhooks are the primary producer (S20a/S20b, ADR-0017); this slice is the poller, retained as backfill** for initial
+sync, gap recovery after receiver or tunnel downtime, and periodic reconciliation. It writes `inbox_events` rows in the
+*identical* shape the receiver writes, with an incremental `since` cursor per account in `cursors`. Readers below do not
+know or care which producer supplied a row, and no reader may branch on `source`.
 
 **Acceptance criteria**
 - Given a first poll, When it runs, Then it fetches from the configured lookback, stores comments, and records a `since`
   cursor per account.
+- Given the webhook receiver already delivered an item in the polled range, When the poll stores its rows, Then the S20b
+  uniqueness constraint makes it a no-op and the item appears exactly once.
 - Given a subsequent poll, When it runs, Then it starts from the stored cursor and stores only new items.
 - Given a poll is interrupted, When it runs again, Then the cursor only advances for pages fully persisted (no gaps).
 - Given `meta_comments_list` with filters (account, post, `unanswered`, `since`, label), When called, Then results are
@@ -712,7 +1062,8 @@ Polling only in v1 (ADR-0007), with an incremental `since` cursor per account wr
 - Given stored comments, When read back, Then bodies are encrypted at rest.
 
 **Tests**
-- unit `test/unit/services/comment-cursor.test.ts` — first poll lookback; incremental advance; interrupted poll leaves no gap.
+- unit `test/unit/services/comment-cursor.test.ts` — first poll lookback; incremental advance; interrupted poll leaves no gap;
+  polling a range the webhook already covered adds zero duplicate rows.
 - unit `test/unit/services/comments-list.test.ts` — each filter; `unanswered` logic; excerpt truncation; pagination.
 - unit `test/unit/lib/mask-pii.test.ts` — username and body masked in log output.
 - integration `test/integration/meta/comments.test.ts` — pagination, throttling headers, error mapping.
@@ -845,8 +1196,11 @@ Reply graph: `load_context → check_window → draft → await_approval → sen
 **Agents:** implementer (sonnet) → verifier (haiku) → REVIEW **security-reviewer (opus, mandatory)** → docs-writer (haiku)
 **Size:** ~250 lines
 
-Mitigation for the accepted risk in ADR-0007: polling-only v1 cannot receive Meta's webhook deletion notifications in real
-time, so a reconciliation job re-reads recent items and purges anything Meta no longer returns.
+**Changed by ADR-0017.** Deletion notifications now arrive by webhook and are purged in near-real time by the S20b
+consumer, so ADR-0007's accepted risk is **resolved, not mitigated**. This slice is no longer the primary defence: it is
+the **safety net** for the window in which the receiver or the tunnel was down, for items deleted before subscription, and
+for retention limits, which are independent of deletions. The deletion-event consumer specified here is now exercised by a
+real producer (S20b) as well as by direct row insertion.
 
 **Acceptance criteria**
 - Given a retention period per data class (message bodies, comments, research cache), When the retention job runs, Then
@@ -858,8 +1212,10 @@ time, so a reconciliation job re-reads recent items and purges anything Meta no 
 - Given a purge command with an account id or a person id, When run, Then all rows for that subject are removed across
   every table and the command reports counts per table.
 - Given a purge, When it completes, Then a re-poll does not resurrect the data inside the same reconciliation window.
-- Given a deletion event arrives in `inbox_events` (the future webhook path), When processed, Then the same purge code runs
-  — the handler is written now and is the only writer-agnostic consumer.
+- Given a deletion event arrives in `inbox_events` from the webhook receiver, When processed, Then the same purge code runs
+  — the consumer is producer-agnostic and is exercised both by a real S20b event and by a directly inserted row.
+- Given the receiver was down for a period, When reconciliation next runs over that window, Then items deleted upstream
+  during the outage are purged, closing the only remaining deletion gap.
 
 **Tests**
 - unit `test/unit/services/retention.test.ts` — per-class retention boundaries; injected clock; counts reported.
@@ -997,27 +1353,81 @@ Required by the Definition of Done. Two arms over a fixture of **200 comments**:
 **Agents:** docs-writer (haiku) drafts → security-reviewer (opus) signs off the checklist → verifier (haiku) runs the gate → main session commits
 **Size:** ~290 lines (documentation)
 
+**Split for size (2026-09-18).** The transport and webhook scope change adds a second transport's documentation, a tunnel
+deployment guide and an entire threat-model section, which pushes this past the 300-line rule. S31 now covers `README.md`,
+`docs/architecture.md`, `.env.example` and the release gate; **S31a** covers `SECURITY.md` and the consolidated security
+evidence. The criteria below marked *(→ S31a)* move to that slice.
+
 **Acceptance criteria**
 - Given `README.md`, When read, Then it covers features, quick start, the exact `claude mcp add` command
   (`claude mcp add --transport stdio meta-content-mcp -- node <flags> /abs/path/dist/server/index.js`), a full config table,
   the per-feature Meta permission table, and the Advanced Access + App Review note for messaging.
-- Given `SECURITY.md`, When read, Then it contains the threat model table, accepted risks (including the ADR-0007
-  deletion-notification risk) and a vulnerability reporting address.
+- Given `README.md`, When read, Then it also documents the **Streamable HTTP** entry point (bind address, allowed origins,
+  the OAuth configuration, and the explicit warning that a non-loopback bind is a deliberate deployment decision) and the
+  **webhook receiver quick start**: install `cloudflared` (an operational prerequisite, *not* an npm dependency), run the
+  tunnel to the loopback receiver, register the resulting public callback URL and the verify token in the Meta app, run
+  the S20c subscribe command, then confirm with `meta_webhook_status`. A VPS + reverse proxy is documented as a secondary
+  path in one short section.
 - Given `docs/architecture.md`, When read, Then Mermaid diagrams for layers, the publish, research, triage and reply graphs
   and model routing match the implemented code.
-- Given `.env.example`, When compared to the config schema, Then every variable is present, documented and has no real value.
-- Given `STATUS.md`, When read, Then every item of the `security-hardening` checklist is checked with evidence (test name,
-  command output or file reference), or listed as an accepted risk.
+- Given `.env.example`, When compared to the config schema, Then every variable is present, documented and has no real
+  value — including `MCP_HTTP_*`, the OAuth settings, `WEBHOOK_PORT`, `META_WEBHOOK_VERIFY_TOKEN` and the public callback
+  URL. `cloudflared` appears as a prerequisite in the README, **never** in `package.json`.
 - Given a clean clone, When `npm ci && npm run verify` runs, Then it passes and the summary is pasted into `STATUS.md`.
-- Given the repository history, When the secret scan runs, Then it reports zero findings and the command output is recorded.
 - Given the manual check, When performed, Then `claude mcp add`, `tools/list`, `meta_account_health` and a full DRY_RUN
-  publish are recorded in `STATUS.md`.
+  publish are recorded in `STATUS.md` — **over both transports**, plus one real webhook delivery through the tunnel
+  recorded with its date, or an explicit note that no Meta app was available (see Known evidence gaps).
 
 **Tests**
 - unit `test/unit/config/env-example.test.ts` — `.env.example` and the config schema have identical variable sets.
-- unit `test/unit/docs/architecture-sync.test.ts` — every graph name in `src/workflows/` appears in `docs/architecture.md`.
+- unit `test/unit/docs/architecture-sync.test.ts` — every graph name in `src/workflows/` appears in `docs/architecture.md`;
+  both transports and the receiver appear in the layer diagram.
 - contract `test/contract/tool-inventory.test.ts` — the registered tool list equals the documented list in `README.md`.
-- The gate run, the secret scan output and the manual check are the evidence artifacts.
+- unit `test/unit/docs/no-cloudflared-dependency.test.ts` — `package.json` contains no `cloudflared` entry while the README
+  quick start does.
+- The gate run and the manual check are the evidence artifacts.
+
+---
+
+## S31a — `SECURITY.md`, threat model, consolidated security evidence
+
+**Depends on:** S31
+**Meta permissions:** none
+**Agents:** docs-writer (haiku) drafts → REVIEW **security-reviewer (opus, mandatory)** signs off → verifier (haiku) → main session commits
+**Size:** ~250 lines (documentation)
+
+Split out of S31 because the scope change roughly doubles the threat-model surface: the `security-hardening` skill's
+"HTTP transport" section moved from *not applicable* to *in scope*, and the receiver adds its own rows.
+
+**Acceptance criteria**
+- Given `SECURITY.md`, When read, Then it contains the threat model table **with the rows the HTTP transport and the
+  receiver add**: inbound MCP tokens (theft, wrong audience, passthrough to Meta), the listening socket (DNS rebinding,
+  unintended non-loopback exposure), webhook authenticity (forged or replayed deliveries), webhook payloads (third-party
+  text, personal data at rest) and the tunnel credential — each with its control and its evidence.
+- Given the `security-hardening` checklist's "HTTP transport" section, When reviewed, Then every box is checked **with a
+  test name**: MCP-spec authorization and audience-checked tokens (S05b), no token passthrough (S05b
+  `auth-no-passthrough.test.ts`), `Origin` validation (S05a `http-origin.test.ts`), `127.0.0.1` binding unless explicitly
+  deployed (S05a + S20a), `X-Hub-Signature-256` with `timingSafeEqual` over the raw body (S20a `signature.test.ts`).
+  It is **not** marked not-applicable.
+- Given the "Accepted risks" section, When read, Then the ADR-0007 deletion-notification risk is recorded as **RESOLVED by
+  ADR-0017**, with the residual gap now limited to receiver/tunnel downtime and covered by S26 reconciliation — stated as
+  an improvement, with the old risk left visible rather than deleted.
+- Given the receiver's exposure, When described, Then it says plainly that the receiver **binds to loopback and is reached
+  only through Cloudflare Tunnel**, so there is no public origin server and no inbound port; `cloudflared` credentials are
+  a secret handled like any other, and the VPS + reverse-proxy alternative carries its own explicit warning.
+- Given webhook content, When described, Then it is documented as third-party text that is never treated as instructions,
+  citing the S20b injection test.
+- Given `STATUS.md`, When read, Then every item of the `security-hardening` checklist is checked with evidence (test name,
+  command output or file reference) or listed as an accepted risk.
+- Given the repository history, When the secret scan runs, Then it reports zero findings and the command output is recorded.
+- Given the live-only evidence, When recorded, Then real webhook delivery is stated as manually verified with a date, or
+  explicitly listed as an evidence gap — never implied to be covered by CI.
+
+**Tests**
+- unit `test/unit/docs/security-checklist-sync.test.ts` — every checklist heading in the `security-hardening` skill appears
+  in `SECURITY.md`, and no section is marked "not applicable".
+- unit `test/unit/docs/threat-model-sync.test.ts` — every threat-model row has a control and an evidence reference.
+- The signed-off checklist and the secret scan output are the evidence artifacts.
 
 ---
 
@@ -1028,14 +1438,21 @@ Required by the Definition of Done. Two arms over a fixture of **200 comments**:
 | `npm run verify` from a clean clone | S01, re-run every slice, final evidence S31 |
 | Coverage ≥ 90% on `services/`, `workflows/`, `llm/` | thresholds set S01; enforced from S05 onward |
 | Every tool has annotations + strict input and output schemas | S05 contract test, extended each tool slice |
-| Security checklist with evidence in `STATUS.md` | every REVIEW step; consolidated S31 |
+| Security checklist with evidence in `STATUS.md` | every REVIEW step; consolidated S31a |
 | Publish and reply flows in DRY_RUN with graph path tests | S13, S14, S25 |
 | Messaging policy tests (window, private reply, human agent tag, deletion) | S23, S24, S25, S26 |
 | Router tests (fast path, escalation, cache, budget) | S27, S28 |
 | `docs/cost.md` measured comparison over 200 fixture comments | S29 |
 | Subagent model routing verified once | already recorded in `STATUS.md` (2026-09-18) |
-| Works via `claude mcp add` | S05 smoke; documented S31 |
-| No secrets in git history | gitleaks in CI from S01; documented S31 |
+| Works via `claude mcp add` | S05 smoke (stdio); S05a smoke (HTTP); documented S31 |
+| No secrets in git history | gitleaks in CI from S01; documented S31a |
+| **Both transports serve the identical tool surface** | **S05a `http-transport.test.ts` runs the S05 contract suite twice** |
+| **HTTP authorization: audience-checked, no passthrough, `Origin`, loopback bind** | **S05a, S05b; checklist evidence S31a** |
+| **Transport swappability (delete one entry point cheaply)** | **S05a `transport-isolation.test.ts`** |
+| **Webhook handshake, signature and ack proven on synthetic requests** | **S20a; real delivery `LIVE_TESTS=true` only** |
+| **Webhook and poller produce identical `inbox_events` rows** | **S20b `producer-parity.test.ts`** |
+| **Deletion notifications honoured in near-real time** | **S20b `deletion-event.test.ts` + S26 reconciliation backstop** |
+| **Receiver reachable without an open port (Cloudflare Tunnel)** | **ADR-0018; documented S31; security evidence S31a** |
 
 ---
 
@@ -1051,14 +1468,20 @@ Required by the Definition of Done. Two arms over a fixture of **200 comments**:
 2. **npm publishing.** Will this be published to npm? It changes `package.json` (`name` scope, `files` allowlist,
    provenance in CI) in S01. **Default: no — private repo, install from source.**
 
-**Still open from PROMPT.md section 8 (planned as defaults; the alternative is additive):**
+**Resolved from PROMPT.md section 8:**
 
-3. **Transport (section 8.3).** Planned: stdio only. `src/server/` is structured so slice **A1** (Streamable HTTP + OAuth)
-   adds an entry point touching no tool, service or meta code. Confirm you are happy deferring OAuth. See ADR-0006.
-4. **Inbox data flow (section 8.5).** Planned: polling only, incremental `since` cursors, events landing in `inbox_events`
-   so a later webhook receiver (slice **A2**) writes into the same table without changing readers. **Accepted risk:** Meta
-   sends deletion notifications by webhook, so v1 cannot honor them in real time; S26 mitigates with a reconciliation and
-   purge job on a configurable lookback. Confirm the lookback and that the delay is acceptable. See ADR-0007.
+3. **~~Transport (section 8.3).~~ RESOLVED 2026-09-18 — Streamable HTTP, *in addition to* stdio.** Both entry points ship
+   from one `createServer(deps)`; stdio stays the default for local Claude Code use. Deferred slice A1 became S05a + S05b.
+   ADR-0006 is superseded by **ADR-0016**. Confirmed by the user.
+4. **~~Inbox data flow (section 8.5).~~ RESOLVED 2026-09-18 — webhooks primary, polling retained as backfill.** The
+   receiver (S20a–S20c) is the primary producer; S21's poller covers initial sync, gap recovery and reconciliation. Both
+   write the same `inbox_events` rows. ADR-0007's accepted deletion-notification risk is **RESOLVED**, not merely
+   mitigated. ADR-0007 is superseded by **ADR-0017**. Confirmed by the user.
+   *Still to confirm within this:* the S26 reconciliation lookback (open question 10 proposes 30 days) — now a downtime
+   backstop rather than the primary deletion defence, so a shorter window may suffice.
+   **RESOLVED 2026-09-18 — receiver hosting: Cloudflare Tunnel.** Loopback bind, no open port, no certificate management;
+   `cloudflared` is an operational prerequisite documented in the README, not an npm dependency. VPS + reverse proxy is a
+   documented secondary path only. See **ADR-0018**.
 
 **Blocking the slice named:**
 
@@ -1080,3 +1503,23 @@ Required by the Definition of Done. Two arms over a fixture of **200 comments**:
     so `STATUS.md` records it as a known evidence gap rather than a failure.
 12. **R2 bucket host (S11).** What is the public R2 hostname to put in `MEDIA_URL_ALLOWLIST`? Without it the allowlist
     defaults to empty, which means "any public HTTPS host that passes the SSRF checks" — weaker than intended.
+
+**New, raised by the transport + inbox scope change:**
+
+13. **OAuth authorization server for the MCP HTTP transport (blocks S05b).** This server will be an OAuth **resource
+    server** — but who issues the tokens it accepts? (a) This project also acts as its own minimal authorization server;
+    (b) an external IdP (which one?) with this server only validating; (c) a single static pre-issued token for personal
+    use, with the full flow deferred. **Proposed default: (b)**, because writing an authorization server is a large,
+    security-critical surface that the `security-hardening` skill would demand full evidence for, and (c) fails the
+    spec's authorization requirements. This also determines whether dynamic client registration is needed. **Blocks S05b
+    only** — S05a can be built and tested first.
+14. **Who connects over HTTP, and from where (shapes S05a defaults and S31a's threat model).** Is Streamable HTTP for
+    (a) local clients on the same machine that simply prefer HTTP — in which case the loopback default is permanent and
+    the network threat model stays small — or (b) genuinely remote clients, which makes multi-user isolation, per-client
+    token scoping and rate limiting real requirements? **Proposed default: (a).** The plan currently assumes (a): a
+    non-loopback bind requires an explicit variable and refuses to start without authorization configured. Answer (b) and
+    S05b grows, and a per-principal authorization slice becomes necessary.
+15. **Webhook verify token and callback path (S20a/S20c).** Confirm that `META_WEBHOOK_VERIFY_TOKEN` is a generated random
+    string held only in the environment (proposed), and confirm the callback path to register in the Meta app — proposed
+    `/webhooks/meta` on the tunnel hostname, with a random path segment as defence in depth rather than as a security
+    control. The tunnel hostname itself is needed before the Meta app registration step can be documented concretely.

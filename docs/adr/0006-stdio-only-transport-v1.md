@@ -1,9 +1,13 @@
 # ADR-0006 — stdio-only transport in v1
 
-- **Status:** Accepted (planning default — user decision still **open**, see `PLAN.md` open question 3)
+- **Status:** **Superseded by [ADR-0016](0016-dual-transport-stdio-and-streamable-http.md) (2026-09-18)** — the user
+  answered `PROMPT.md` Q3 with "Streamable HTTP", so the planning default that OAuth could be deferred no longer holds;
+  stdio survives as the default entry point, but it is no longer the *only* one.
 - **Date:** 2026-09-18
 - **Deciders:** planner (proposed), user (to confirm)
-- **Related:** ADR-0001, ADR-0003
+- **Related:** ADR-0001, ADR-0003, ADR-0016
+- **Note:** this record is kept unedited below as the history of why stdio-only was proposed. Its structural requirements
+  (transport-agnostic `createServer`, stdout protocol-only, graceful shutdown) all survive into ADR-0016.
 
 ## Context
 

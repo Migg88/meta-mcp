@@ -4,8 +4,10 @@
 
 S01 — Repo skeleton, verify gate, CI — **SPEC**
 
-> Plan written 2026-09-18. No implementation exists yet: no `src/`, no `package.json`, no tests.
-> S01 must not start until open questions 1 and 2 in `PLAN.md` are answered (see Blockers below).
+> Plan written 2026-09-18, revised the same day for the transport + inbox scope change. No implementation exists yet:
+> no `src/`, no `package.json`, no tests.
+> **Slice count: 37** (was 31). S05a, S05b, S20a, S20b, S20c and S31a were added; ids S01–S31 are unchanged.
+> S01 is blocked only by open question 2 (npm publishing); question 1 is resolved (see Blockers below).
 
 ## Acceptance criteria
 
@@ -35,6 +37,11 @@ _None yet — nothing has been implemented or run._
 
 _Not started. S01 touches the "Supply chain and CI" section only; evidence goes here after the REVIEW step._
 
+> **Scope change 2026-09-18.** The `security-hardening` skill's **"HTTP transport"** section is no longer out of scope.
+> All three of its items now require evidence: MCP-spec authorization with audience-checked tokens and no passthrough
+> (S05b), `Origin` validation and `127.0.0.1` binding (S05a, S20a), and `X-Hub-Signature-256` verified with
+> `timingSafeEqual` over the raw body (S20a). Consolidated and signed off in S31a.
+
 ## Verified once
 
 Evidence that does not need re-checking each slice.
@@ -58,18 +65,45 @@ Evidence that does not need re-checking each slice.
 - `test/live/` will stay empty unless the user has a Meta app with Advanced Access for messaging and identity verification
   for the Ad Library (open question 11). Messaging and Ad Library slices would then be proven against mocked HTTP only.
   This is acceptable, but it is recorded here rather than presented as full verification.
+- **Webhook delivery cannot be proven end to end in CI** (added 2026-09-18, ADR-0017). It needs a public callback URL, a
+  registered Meta app and Meta actually sending. S20a/S20b prove the handshake, signature verification, enqueue, dedupe
+  and ack contract against **synthetic requests** whose signatures are computed in-test from a test app secret — that
+  covers every line of our own logic. Real delivery through the Cloudflare Tunnel is a manual `LIVE_TESTS=true` run
+  (`test/live/webhook-delivery.test.ts`) to be recorded here with a date, or explicitly declared missing. It must never be
+  implied that CI covers it.
+- **`cloudflared` sits outside the verify gate** (ADR-0018). It is an operational prerequisite, not an npm dependency, so
+  `npm audit` and the lockfile do not see it. Its version used for any live evidence should be recorded alongside that run.
+- **Meta webhook documentation is not yet verified.** `docs/meta-endpoints.md` has no webhook section. Handshake
+  parameters, signature header, payload envelope and `subscribed_fields` must be researched and logged before S20a.
+- **The v2 Streamable HTTP server API is not yet verified.** `docs/research/mcp-sdk-verification.md` covers stdio
+  (item 2d) only. S05a and S05b each begin with a research step against the installed package's types and the
+  `2026-07-28` authorization section.
 
 ## Blockers / questions
 
-Full list in `PLAN.md` → "Open questions". Blocking the start of S01:
+Full list in `PLAN.md` → "Open questions".
 
-1. **`node:sqlite` and the Node 22 flag.** On Node 22 LTS, `node:sqlite` requires `--experimental-sqlite`. Choose:
-   (a) `engines: ">=22.5.0"` + a `bin` shim that re-execs with the flag + a documented
-   `claude mcp add ... -- node --experimental-sqlite dist/server/index.js`; (b) require Node 24+ where it is unflagged;
-   (c) ship `better-sqlite3` behind the driver interface instead. **Default if unanswered: (a).** Determines `engines`,
-   `bin` and the README command. See ADR-0003.
+**Resolved:**
+
+1. **~~`node:sqlite` and the Node 22 flag.~~ RESOLVED 2026-09-18 — the premise was wrong.** `node:sqlite` is unflagged
+   since Node v22.13.0 and a release candidate from v24.15.0. `engines: ">=22.13.0"`, no shim, `claude mcp add` stays a
+   plain `node dist/server/index.js`. See ADR-0003. **Do not reopen.**
+3. **~~Transport.~~ RESOLVED 2026-09-18 — Streamable HTTP *in addition to* stdio.** ADR-0006 superseded by ADR-0016.
+   Slices S05a, S05b.
+4. **~~Inbox data flow.~~ RESOLVED 2026-09-18 — webhooks primary, polling retained as backfill.** ADR-0007 superseded by
+   ADR-0017; its accepted deletion-notification risk is now **RESOLVED**. Slices S20a–S20c.
+   **~~Receiver hosting.~~ RESOLVED 2026-09-18 — Cloudflare Tunnel**, loopback bind, `cloudflared` as an operational
+   prerequisite. See ADR-0018.
+
+**Still blocking the start of S01:**
+
 2. **npm publishing.** Publish to npm or not? Changes `package.json` (`name` scope, `files` allowlist, provenance in CI).
    **Default: no.**
 
-Planned defaults awaiting confirmation (do not block S01, but shape later slices): transport stdio-only (ADR-0006) and
-polling-only inbox with the accepted deletion-notification risk (ADR-0007).
+**Blocking later slices only (S01–S05 may proceed):**
+
+- **Open question 13 — the OAuth authorization server for the MCP HTTP transport.** Blocks **S05b**; S05a can be built
+  first (loopback, unauthenticated, refuses a non-loopback bind).
+- **Open question 14 — local-only or genuinely remote HTTP clients.** Shapes S05a defaults and the S31a threat model.
+- **Open question 15 — webhook verify token and callback path.** Needed before the Meta app registration step in S20c can
+  be documented concretely.
